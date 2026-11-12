@@ -49,12 +49,14 @@ public final class MicYouClient {
     private long sessionId;
     private int sequenceNumber;
     private volatile long lastSentAt;
+    private volatile long lastPingAt;
+    private volatile long lastAudioSentAt;
     private Thread captureThread;
     private int streamGeneration;
 
     public MicYouClient(Listener listener) {
         this.listener = listener;
-        worker.scheduleWithFixedDelay(this::tick, 1500, 2000, TimeUnit.MILLISECONDS);
+        worker.scheduleWithFixedDelay(this::tick, 1000, 1500, TimeUnit.MILLISECONDS);
     }
 
     public boolean isConnected() {
@@ -120,11 +122,11 @@ public final class MicYouClient {
         if (!connected) {
             throw new IOException(lastError.isEmpty() ? "语音通道未连接" : lastError);
         }
-        final AudioRecordHolder holder = openAudioRecord();
         final int generation;
         synchronized (stateLock) {
             stopCaptureLocked();
             streaming = true;
+            lastAudioSentAt = System.currentTimeMillis();
             generation = ++streamGeneration;
         }
         try {
@@ -133,14 +135,12 @@ public final class MicYouClient {
             synchronized (stateLock) {
                 if (generation == streamGeneration) streaming = false;
             }
-            holder.release();
             closeSocket("语音通道发送失败");
             throw e;
         }
-        Thread thread = new Thread(() -> runCapture(holder, generation), "andpan-audio-tx");
+        Thread thread = new Thread(() -> runCaptureLoop(generation), "andpan-audio-tx");
         synchronized (stateLock) {
             if (!streaming || generation != streamGeneration) {
-                holder.release();
                 return;
             }
             captureThread = thread;
@@ -183,13 +183,24 @@ public final class MicYouClient {
     private void tick() {
         try {
             boolean shouldConnect;
+            boolean needWatchdogReset = false;
+            long now = System.currentTimeMillis();
             synchronized (stateLock) {
                 shouldConnect = !shutdown && wantConnected && !connected;
+                if (connected && streaming && (now - lastAudioSentAt > 4500)) {
+                    needWatchdogReset = true;
+                }
+            }
+            if (needWatchdogReset) {
+                android.util.Log.w("AndPan", "音频发送超时，触发链路看门狗复位");
+                closeSocket("音频传输中断");
+                return;
             }
             if (shouldConnect) {
                 connectIfNeeded();
-            } else if (connected && !streaming && System.currentTimeMillis() - lastSentAt >= 1500) {
-                sendPing(System.currentTimeMillis());
+            } else if (connected && (now - lastSentAt >= 1200 || now - lastPingAt >= 2500)) {
+                lastPingAt = now;
+                sendPing(now);
             }
         } catch (Exception e) {
             closeSocket("语音连接中断");
@@ -217,8 +228,9 @@ public final class MicYouClient {
         try {
             candidate = new Socket();
             candidate.setTcpNoDelay(true);
+            candidate.setKeepAlive(true);
             candidate.connect(new InetSocketAddress(host, port), 3000);
-            candidate.setSoTimeout(10000);
+            candidate.setSoTimeout(0);
             OutputStream out = candidate.getOutputStream();
             InputStream in = candidate.getInputStream();
             out.write(HANDSHAKE_CLIENT);
@@ -247,6 +259,7 @@ public final class MicYouClient {
                 this.connected = true;
                 this.lastError = "";
                 this.lastSentAt = System.currentTimeMillis();
+                this.lastPingAt = System.currentTimeMillis();
             }
             final Socket activeSocket = candidate;
             Thread reader = new Thread(() -> runReader(activeSocket, in), "andpan-audio-rx");
@@ -348,43 +361,61 @@ public final class MicYouClient {
         return System.currentTimeMillis();
     }
 
-    private void runCapture(AudioRecordHolder holder, int generation) {
-        byte[] pcm = new byte[holder.frameBytes];
-        try {
-            holder.record.startRecording();
-            if (holder.record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
-                throw new IOException("无法开启手机麦克风");
-            }
-            while (streaming && generation == streamGeneration && connected) {
-                int offset = 0;
-                while (offset < pcm.length && streaming && generation == streamGeneration) {
-                    int read = holder.record.read(pcm, offset, pcm.length - offset);
-                    if (read <= 0) {
-                        throw new IOException("手机麦克风读取失败");
+    private void runCaptureLoop(int generation) {
+        int attempts = 0;
+        while (streaming && generation == streamGeneration) {
+            AudioRecordHolder holder = null;
+            try {
+                holder = openAudioRecord();
+                holder.record.startRecording();
+                if (holder.record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                    throw new IOException("手机麦克风未处于录制状态");
+                }
+                attempts = 0;
+                byte[] pcm = new byte[holder.frameBytes];
+                while (streaming && generation == streamGeneration && connected) {
+                    int offset = 0;
+                    while (offset < pcm.length && streaming && generation == streamGeneration) {
+                        int read = holder.record.read(pcm, offset, pcm.length - offset);
+                        if (read < 0) {
+                            throw new IOException("读取麦克风数据失败: " + read);
+                        }
+                        if (read == 0) {
+                            try { Thread.sleep(5); } catch (InterruptedException ignored) {}
+                        }
+                        offset += read;
                     }
-                    offset += read;
+                    if (!streaming || generation != streamGeneration || !connected) break;
+                    long sid;
+                    int seq;
+                    synchronized (stateLock) {
+                        sid = sessionId;
+                        seq = sequenceNumber++;
+                        if (sequenceNumber < 0) sequenceNumber = 0;
+                    }
+                    byte[] payload = encodeAudio(seq, pcm, holder.sampleRate, sid, System.currentTimeMillis());
+                    sendFrame(payload);
+                    lastAudioSentAt = System.currentTimeMillis();
                 }
-                if (!streaming || generation != streamGeneration || !connected) break;
-                long sid;
-                int seq;
-                synchronized (stateLock) {
-                    sid = sessionId;
-                    seq = sequenceNumber++;
-                    if (sequenceNumber < 0) sequenceNumber = 0;
+                break;
+            } catch (Exception e) {
+                attempts++;
+                android.util.Log.w("AndPan", "采音异常，正在重试 (" + attempts + "): " + e.getMessage());
+                if (holder != null) holder.release();
+                if (!streaming || generation != streamGeneration || attempts >= 3) {
+                    synchronized (stateLock) {
+                        if (generation == streamGeneration) {
+                            lastError = e.getMessage() == null ? "手机采音中断" : e.getMessage();
+                            streaming = false;
+                        }
+                    }
+                    notifyListener();
+                    break;
                 }
-                byte[] payload = encodeAudio(seq, pcm, holder.sampleRate, sid, System.currentTimeMillis());
-                sendFrame(payload);
+                try { Thread.sleep(150); } catch (InterruptedException ignored) {}
+            } finally {
+                if (holder != null) holder.release();
             }
-        } catch (IOException e) {
-            synchronized (stateLock) {
-                if (generation == streamGeneration) {
-                    lastError = e.getMessage() == null ? "手机采音中断" : e.getMessage();
-                    streaming = false;
-                }
-            }
-            notifyListener();
-        } finally {
-            holder.release();
         }
     }
 
@@ -504,10 +535,15 @@ public final class MicYouClient {
             out = output;
             if (!connected || out == null) throw new IOException("语音通道未连接");
         }
-        synchronized (writeLock) {
-            writeRawFrame(out, payload);
+        try {
+            synchronized (writeLock) {
+                writeRawFrame(out, payload);
+            }
+            lastSentAt = System.currentTimeMillis();
+        } catch (IOException e) {
+            closeSocket("语音通道写入失败");
+            throw e;
         }
-        lastSentAt = System.currentTimeMillis();
     }
 
     private static void writeRawFrame(OutputStream out, byte[] payload) throws IOException {
