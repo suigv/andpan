@@ -2,6 +2,20 @@
 
 [English](#english) | [中文说明](#中文说明)
 
+<p align="center">
+  <img src="docs/images/phone-deck-active.png" alt="AndPan Phone Deck Active" width="820" />
+</p>
+<p align="center">
+  <em>手机端控制台：36 格动态电平、Mac 系统状态/进程监控、当前应用回车发送、麦克风常开收音</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/phone-deck-idle.png" alt="AndPan Phone Deck Idle" width="560" />
+</p>
+<p align="center">
+  <em>手机端控制台待命静音状态</em>
+</p>
+
 ---
 
 ## 中文说明
@@ -43,6 +57,18 @@ AndPan 可以将一台旧 Android 手机（例如坚果 Pro / Android 7.1+）变
 - 构建 Mac 桌面端：`./mac/build-app.sh`（生成 `AndPan.app` 并链接至 `/Applications`）
 - 服务端回归测试：`node --test tests/server.test.mjs`
 
+### 界面预览 (Screenshots)
+
+| 手机端控制台（常开收音模式） | 手机端控制台（待命状态） |
+| :---: | :---: |
+| <img src="docs/images/phone-deck-active.png" width="420" /> | <img src="docs/images/phone-deck-idle.png" width="420" /> |
+
+<p align="center">
+  <img src="docs/images/android-home-icon.png" alt="Android Home Icon" width="220" />
+  <br />
+  <em>坚果手机桌面 AndPan 图标</em>
+</p>
+
 ---
 
 ## English
@@ -83,6 +109,13 @@ No app-switching required: the Android client streams low-latency PCM audio dire
 - Build APK: `./android/build.sh` -> `.build/android/andpan.apk`
 - Build Mac App: `./mac/build-app.sh` -> `AndPan.app`
 - Test Suite: `node --test tests/server.test.mjs`
+
+### Screenshots
+
+- **Android Companion Deck (Live Streaming & System Stats)**:
+  ![Android Deck Active](docs/images/phone-deck-active.png)
+- **Android Companion Deck (Idle)**:
+  ![Android Deck Idle](docs/images/phone-deck-idle.png)
 
 1. 在 Mac 的「应用程序」中打开 **AndPan**。窗口会自动启动主服务和内置的 MicYou 语音接收服务，无需单独打开 MicYou。macOS 如请求设备控制或麦克风权限，请允许 AndPan 使用。设备控制位于「系统设置 → 隐私与安全 → 设备控制和数据访问」，旧版 macOS 可能称为「辅助功能」。项目更新后若开关已开启但仍提示未授权，请移除列表中的旧 **AndPan Mac**，再添加本项目目录里的 `AndPan Mac.app` 并启用。
 2. 首次安装或更新手机端时，用 USB 连接 Android，打开 USB 调试并允许电脑连接，再在 Mac 窗口点击「安装 / 更新手机端」。安装和设置完成后可以拔掉 USB。
