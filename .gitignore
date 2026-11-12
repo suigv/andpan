@@ -1,0 +1,8 @@
+.build/
+.runtime/
+.playwright-mcp/
+release/
+*.apk
+*.app
+*.zip
+.DS_Store
