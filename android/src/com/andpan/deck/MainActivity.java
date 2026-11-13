@@ -813,7 +813,8 @@ public final class MainActivity extends Activity {
                     }
                     hint.setText("请在 Mac 打开 AndPan；点「设置」检查连接地址。");
                     updateButtons();
-                    if (System.currentTimeMillis() - lastDiscovery > 15000) discoverMac(null);
+                    // 绝不在后台自动发射 UDP 全网广播，避免劣质路由器因空口广播风暴导致 Wi-Fi 假死
+                    // 已保存 Mac 地址时直接走定向 TCP 重试
                 });
             }
         });
@@ -1175,9 +1176,6 @@ public final class MainActivity extends Activity {
                 socket.setBroadcast(true);
                 socket.setSoTimeout(2500);
                 byte[] query = "ANDPAN_DISCOVER_V1".getBytes(StandardCharsets.UTF_8);
-                try {
-                    socket.send(new DatagramPacket(query, query.length, InetAddress.getByName("255.255.255.255"), 43127));
-                } catch (Exception ignored) {}
                 try {
                     Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
                     while (interfaces != null && interfaces.hasMoreElements()) {
