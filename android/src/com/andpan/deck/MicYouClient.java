@@ -3,6 +3,8 @@ package com.andpan.deck;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
 import android.os.Looper;
 
 import java.io.ByteArrayOutputStream;
@@ -364,6 +366,7 @@ public final class MicYouClient {
                 }
                 attempts = 0;
                 byte[] pcm = new byte[holder.frameBytes];
+                long streamStartedAt = System.currentTimeMillis();
                 while (streaming && generation == streamGeneration && connected) {
                     int offset = 0;
                     while (offset < pcm.length && streaming && generation == streamGeneration) {
@@ -387,8 +390,13 @@ public final class MicYouClient {
                     byte[] payload = encodeAudio(seq, pcm, holder.sampleRate, sid, System.currentTimeMillis());
                     sendFrame(payload);
                     lastAudioSentAt = System.currentTimeMillis();
+                    // 每持续 5 分钟在两帧间无感热复位一次硬件 AudioRecord，防止底层 HAL 增益衰减或时钟漂移
+                    if (System.currentTimeMillis() - streamStartedAt > 300000) {
+                        android.util.Log.i("AndPan", "执行持续听写 AudioRecord 定期热复位");
+                        break; // 退出当前内层循环，由外层 while 重新创建 holder
+                    }
                 }
-                break;
+                if (!streaming || generation != streamGeneration || !connected) break;
             } catch (Exception e) {
                 attempts++;
                 android.util.Log.w("AndPan", "采音异常，正在重试 (" + attempts + "): " + e.getMessage());
@@ -414,14 +422,32 @@ public final class MicYouClient {
         final AudioRecord record;
         final int sampleRate;
         final int frameBytes;
+        AutomaticGainControl agc;
+        NoiseSuppressor ns;
 
         AudioRecordHolder(AudioRecord record, int sampleRate, int frameBytes) {
             this.record = record;
             this.sampleRate = sampleRate;
             this.frameBytes = frameBytes;
+            try {
+                if (AutomaticGainControl.isAvailable()) {
+                    agc = AutomaticGainControl.create(record.getAudioSessionId());
+                    if (agc != null) agc.setEnabled(false);
+                }
+            } catch (Throwable ignored) {}
+            try {
+                if (NoiseSuppressor.isAvailable()) {
+                    ns = NoiseSuppressor.create(record.getAudioSessionId());
+                    if (ns != null) ns.setEnabled(false);
+                }
+            } catch (Throwable ignored) {}
         }
 
         void release() {
+            try { if (agc != null) agc.release(); } catch (Throwable ignored) {}
+            try { if (ns != null) ns.release(); } catch (Throwable ignored) {}
+            agc = null;
+            ns = null;
             try {
                 if (record.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
                     record.stop();
@@ -433,22 +459,32 @@ public final class MicYouClient {
 
     private AudioRecordHolder openAudioRecord() throws IOException {
         int[] rates = new int[]{48000, 16000};
-        for (int rate : rates) {
-            int minSize = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            if (minSize <= 0) continue;
-            int frameBytes = (rate / 50) * 2;
-            int bufferBytes = Math.max(minSize, frameBytes * 4);
-            AudioRecord record = new AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    rate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferBytes
-            );
-            if (record.getState() == AudioRecord.STATE_INITIALIZED) {
-                return new AudioRecordHolder(record, rate, frameBytes);
+        int[] sources = new int[]{MediaRecorder.AudioSource.VOICE_RECOGNITION, MediaRecorder.AudioSource.MIC};
+        for (int source : sources) {
+            for (int rate : rates) {
+                int minSize = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                if (minSize <= 0) continue;
+                int frameBytes = (rate / 50) * 2;
+                int bufferBytes = Math.max(minSize, frameBytes * 4);
+                AudioRecord record = null;
+                try {
+                    record = new AudioRecord(
+                            source,
+                            rate,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            bufferBytes
+                    );
+                    if (record.getState() == AudioRecord.STATE_INITIALIZED) {
+                        return new AudioRecordHolder(record, rate, frameBytes);
+                    }
+                    record.release();
+                } catch (Exception e) {
+                    if (record != null) {
+                        try { record.release(); } catch (Exception ignored) {}
+                    }
+                }
             }
-            record.release();
         }
         throw new IOException("无法初始化手机麦克风");
     }
