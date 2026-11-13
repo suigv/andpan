@@ -5,6 +5,7 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.media.audiofx.AutomaticGainControl;
 import android.media.audiofx.NoiseSuppressor;
+import android.os.Process;
 import android.os.Looper;
 
 import java.io.ByteArrayOutputStream;
@@ -355,6 +356,9 @@ public final class MicYouClient {
     }
 
     private void runCaptureLoop(int generation) {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
+        } catch (Throwable ignored) {}
         int attempts = 0;
         while (streaming && generation == streamGeneration) {
             AudioRecordHolder holder = null;
@@ -367,6 +371,8 @@ public final class MicYouClient {
                 attempts = 0;
                 byte[] pcm = new byte[holder.frameBytes];
                 long streamStartedAt = System.currentTimeMillis();
+                long silentSamplesCount = 0;
+                long lastEnergyAt = System.currentTimeMillis();
                 while (streaming && generation == streamGeneration && connected) {
                     int offset = 0;
                     while (offset < pcm.length && streaming && generation == streamGeneration) {
@@ -380,6 +386,19 @@ public final class MicYouClient {
                         offset += read;
                     }
                     if (!streaming || generation != streamGeneration || !connected) break;
+
+                    // 计算振幅，检测是否出现声卡低功耗/死机导致的绝对全零或极度静默
+                    long sumSquares = 0;
+                    for (int i = 0; i < pcm.length - 1; i += 2) {
+                        short sample = (short) ((pcm[i] & 0xFF) | (pcm[i + 1] << 8));
+                        sumSquares += (long) sample * sample;
+                    }
+                    double rms = Math.sqrt((double) sumSquares / (pcm.length / 2));
+                    long now = System.currentTimeMillis();
+                    if (rms > 80.0) {
+                        lastEnergyAt = now;
+                    }
+
                     long sid;
                     int seq;
                     synchronized (stateLock) {
@@ -390,10 +409,14 @@ public final class MicYouClient {
                     byte[] payload = encodeAudio(seq, pcm, holder.sampleRate, sid, System.currentTimeMillis());
                     sendFrame(payload);
                     lastAudioSentAt = System.currentTimeMillis();
-                    // 每持续 5 分钟在两帧间无感热复位一次硬件 AudioRecord，防止底层 HAL 增益衰减或时钟漂移
-                    if (System.currentTimeMillis() - streamStartedAt > 300000) {
-                        android.util.Log.i("AndPan", "执行持续听写 AudioRecord 定期热复位");
-                        break; // 退出当前内层循环，由外层 while 重新创建 holder
+
+                    // 闲置自愈机制：
+                    // 1. 如果连续 90 秒没有任何哪怕微小的声音能量（极大概率声卡时钟被系统休眠截断）；
+                    // 2. 或持续收音达到 120 秒；
+                    // 在后台无感重新初始化 AudioRecord，强行唤醒底层硬件 ADC 增益状态，彻底免去手动重开。
+                    if (now - lastEnergyAt > 90000 || now - streamStartedAt > 120000) {
+                        android.util.Log.i("AndPan", "执行声卡防休眠热复位");
+                        break;
                     }
                 }
                 if (!streaming || generation != streamGeneration || !connected) break;

@@ -3,11 +3,14 @@ package com.andpan.deck;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.PowerManager;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ColorFilter;
@@ -138,6 +141,8 @@ public final class MainActivity extends Activity {
     private String micYouServiceError = "";
     private String macInputError = "";
     private MicYouClient audioClient;
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
 
     private static final class ServerRejection extends Exception {
         ServerRejection(String message) { super(message); }
@@ -191,6 +196,16 @@ public final class MainActivity extends Activity {
         getWindow().getDecorView().setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AndPan:ContinuousAudio");
+            }
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "AndPan:ContinuousWifi");
+            }
+        } catch (Throwable ignored) {}
         receiveConnection(getIntent());
         audioClient = new MicYouClient(() -> ui.post(this::updateAudioConnectionPill));
         buildScreen();
@@ -657,6 +672,7 @@ public final class MainActivity extends Activity {
         ui.removeCallbacks(poll);
         releaseMic();
         audioClient.disconnect();
+        releaseLocks();
         super.onPause();
     }
 
@@ -665,6 +681,7 @@ public final class MainActivity extends Activity {
         audioClient.shutdown();
         commands.shutdown();
         microphone.shutdown();
+        releaseLocks();
         super.onDestroy();
     }
 
@@ -687,6 +704,20 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void acquireLocks() {
+        try {
+            if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire();
+            if (wifiLock != null && !wifiLock.isHeld()) wifiLock.acquire();
+        } catch (Throwable ignored) {}
+    }
+
+    private void releaseLocks() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+            if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        } catch (Throwable ignored) {}
+    }
+
     private void startMic(boolean keepOpen) {
         if (!connected || (!keepOpen && !accessibilityReady) || !micAvailable || holding || micStopping) return;
         if (!hasAudioPermission()) {
@@ -698,6 +729,7 @@ public final class MainActivity extends Activity {
         continuous = keepOpen;
         micStarting = true;
         final int generation = ++micGeneration;
+        if (keepOpen) acquireLocks();
         updateButtons();
         microphone.execute(() -> {
             try {
@@ -739,6 +771,7 @@ public final class MainActivity extends Activity {
         micStarting = false;
         micStopping = true;
         final int generation = ++micGeneration;
+        releaseLocks();
         ui.removeCallbacks(heartbeat);
         updateButtons();
         microphone.execute(() -> {
