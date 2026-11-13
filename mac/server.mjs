@@ -154,6 +154,7 @@ export class Microphone {
     this.error = '';
     this.inputError = '';
     this.fnDown = false;
+    this.continuous = false;
     this.lastCheck = 0;
     this.checking = null;
     this.meter = meter;
@@ -197,14 +198,21 @@ export class Microphone {
 
   arm() {
     clearTimeout(this.timer);
+    if (this.continuous) {
+      // In continuous mode, do not auto-mute on transient heartbeat hiccups.
+      // A disconnect watchdog or explicit stop will handle muting.
+      this.timer = null;
+      return;
+    }
     this.timer = setTimeout(() => { void this.stop().catch(() => {}); }, this.leaseMs);
     this.timer.unref();
   }
 
-  async start({ fn = true } = {}) {
+  async start({ fn = true, continuous = false } = {}) {
     const wantFn = fn !== false;
+    this.continuous = Boolean(continuous);
     return this.perform(async () => {
-      if (this.muted === false && this.fnDown === wantFn) {
+      if (this.muted === false && this.fnDown === wantFn && this.continuous === Boolean(continuous)) {
         this.arm();
         return { muted: false, meter: this.meter?.status() };
       }
@@ -235,7 +243,7 @@ export class Microphone {
   }
 
   hold() {
-    if (this.muted !== false || !this.timer) throw problem('麦克风已静音，请重新按住');
+    if (this.muted !== false || (!this.timer && !this.continuous)) throw problem('麦克风已静音，请重新按住');
     this.arm();
     return { muted: false, meter: this.meter?.status() };
   }
@@ -243,11 +251,13 @@ export class Microphone {
   async stop() {
     clearTimeout(this.timer);
     this.timer = null;
+    this.continuous = false;
     this.meter?.stop();
     return this.perform(async () => {
       // A start may have finished after stop was queued.
       clearTimeout(this.timer);
       this.timer = null;
+      this.continuous = false;
       this.meter?.stop();
       let failure;
       if (this.fnDown) {
@@ -526,7 +536,7 @@ export function createDeckServer({ token, desktopDriver, microphoneDriver, fnDri
           if (body.action !== 'send') throw problem('操作无效', 400);
           result = await controller.send(body.pid, body.eventId);
           break;
-        case '/mic/start': result = await microphone.start({ fn: body.fn !== false }); break;
+        case '/mic/start': result = await microphone.start({ fn: body.fn !== false, continuous: body.continuous === true }); break;
         case '/mic/hold': result = microphone.hold(); break;
         case '/mic/stop': result = await microphone.stop(); break;
         default: return send(404, { error: '操作不存在' });

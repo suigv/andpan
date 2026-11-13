@@ -183,18 +183,9 @@ public final class MicYouClient {
     private void tick() {
         try {
             boolean shouldConnect;
-            boolean needWatchdogReset = false;
             long now = System.currentTimeMillis();
             synchronized (stateLock) {
                 shouldConnect = !shutdown && wantConnected && !connected;
-                if (connected && streaming && (now - lastAudioSentAt > 4500)) {
-                    needWatchdogReset = true;
-                }
-            }
-            if (needWatchdogReset) {
-                android.util.Log.w("AndPan", "音频发送超时，触发链路看门狗复位");
-                closeSocket("音频传输中断");
-                return;
             }
             if (shouldConnect) {
                 connectIfNeeded();

@@ -704,6 +704,7 @@ public final class MainActivity extends Activity {
                 audioClient.startStreaming();
                 JSONObject payload = new JSONObject();
                 payload.put("fn", !keepOpen);
+                payload.put("continuous", keepOpen);
                 JSONObject result = request("POST", "/mic/start", payload);
                 ui.post(() -> {
                     if (holding && generation == micGeneration) {

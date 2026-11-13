@@ -71,12 +71,16 @@ test('only samples audio during an active hold and stops after release', async (
 test('continuous mode opens microphone without holding Fn key down', async () => {
   const fnEvents = [];
   const mic = new Microphone(async ({ muted }) => ({ muted }), async req => fnEvents.push(req.action), 6000);
-  const res = await mic.start({ fn: false });
+  const res = await mic.start({ fn: false, continuous: true });
   assert.equal(res.muted, false);
   assert.equal(mic.fnDown, false);
+  assert.equal(mic.continuous, true);
   assert.deepEqual(fnEvents, []);
+  assert.equal(mic.timer, null);
+  assert.equal(mic.hold().muted, false);
   await mic.stop();
   assert.deepEqual(fnEvents, []);
+  assert.equal(mic.continuous, false);
 });
 
 test('serves compiled apk over authenticated endpoint with sha256 checksum', async () => {
